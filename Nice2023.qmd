@@ -1,0 +1,593 @@
+---
+title: "Introduction to Dolo"
+subtitle: "CEF Nice 2023"
+format:
+    revealjs:
+        toc: true
+        toc-depth: 1
+        toc-title: Plan
+
+---
+
+# First Steps
+
+## What is Dolo?
+
+Dolo is both:
+
+::: columns
+
+:::: column
+
+A *modeling language* to describe optimization problems
+
+::::: fragment
+
+Current generation (aka $\lim_{Dolo → 0.5}$) deals with:
+
+- infinite horizon
+- continous controls
+- referred to as `ymodels`
+
+:::::
+
+::::
+
+:::: column
+
+An API to write and solve economic models in Julia and Python
+
+::::: fragment
+
+Latest rewrite in Julia (codenamed `NoLib`) is more general with with in progress on:
+
+- discrete choices
+- heterogenous agents
+
+:::::
+
+::::
+
+:::
+
+## Why Julia?
+
+Julia is a fast language for scientific programming
+
+My preferred features:
+
+::: incremental
+
+- compilation system (progressive, incremental)
+- multiple dispatch
+- parameterized types and immutable static structures (named tuples, svectors... )
+- macros (like `@time` but find myself using them less and less)
+- easy differentiable programming
+- clear path to optimization
+    - variable typing
+    - removing memory allocations
+    - vectorization 
+
+::::
+
+## Workflow (1)
+
+- Activate an environment: `]activate`
+- If first time, instantiate it: `]instantiate`
+    - this pulls all required package in the directory
+- Today: clone NoLib and `]dev path_to_nolib`
+    - will install NoLib with its dependences
+
+## Workflow (2)
+
+- Create a file or a notebook to run calculations.
+    - to be on the safe side: one for each model
+- Import a model file: either
+    - A YAML file: 
+        `model = yaml_import("rbc.yaml")`
+    - A native Julia file:
+        `model = include("rbc.jl")`
+- Inspect the model: @show model
+- Solve the model
+- Inspect the solution, simulate, compute moments.
+
+## YAML file
+
+Let's look at our first model: `models/rbc.yaml`:
+
+- it has a [yaml](https://yaml.org/) structure (lists, keys/values, strings, numbers)
+- all variables in the model are defined beforehand in the symbols section in different categories
+- initial values are given in the calibration section
+- equations mix timed variables and parameters
+- note that some equations / variables are used only for certain kinds of algorithms
+- the options sections contains information that can be used by solution algorithms (here discretization info)
+
+## Import the model 
+
+Import the model:
+
+```julia
+using NoLib
+model = yaml_import("examples/rbc.yaml")
+```
+
+Where did all information go?
+
+Compare with `rbc.jl`.
+
+
+## Solving a model
+
+A typical exercise requires to solve a model:
+
+```julia
+sol = NoLib.time_iteration(model)
+```
+
+The result is a solution object.
+
+Before doing anything with a solution check it is actually correct: ```NoLib.converged(sol)```
+
+## Inspecting the Solution
+
+The solution contains a function-like object: `sol.dr`
+- what is its type?
+
+The function `tabulate` provides a convenient way to plot the decision decision rule: try
+
+```tabulate(model, sol.dr, :k)```
+
+Note that the result is an AxisArray.
+
+## Simulating the solution
+
+One can simulate the solution of a model using:
+
+```julia
+simulate(model, sol.dr)
+```
+
+## Comparing calibrations
+
+One can change parameter values using the `recalibrate` function:
+
+```julia
+model2 = recalibrate(model; beta=0.8)
+```
+
+Note how parameters dependent on beta are updated. 
+
+Exercise: plot the decision rule for different values of delta.
+
+# What is a Dolo Model?
+
+## A General Model Formulation
+
+::: callout-note
+### Model Environment
+
+
+- State-space: $s\in\mathcal{S}$
+- Control-space: $x\in X(s)$
+- Transition __distribution__: $\tau(s,x) \in \mathcal{D}(\mathcal{S})$ 
+- A __decision rule__ is a function $\varphi: \mathcal{S}\rightarrow \mathcal{X(s)}$
+
+:::  
+
+. . .
+
+States/controls can be discrete/continuous
+
+Each combination implies different solution methods
+
+- discrete/discrete -> DDP
+- continuous controls -> current YAML files
+
+## Space
+
+For now Dolo supports
+
+- Cartesian Spaces (`CSpace`)
+- Grid Spaces (`GSpace`)
+- Cartesian Products (`×`)
+
+Space objects contain information about:
+
+- geometry: locator
+- values: values of variables (`space[loc] == val`)
+
+A *qualified point* (`QP`) contains both locator and values
+
+## Application
+
+Compare the rbc_mc, rbc_iid and rbc_ar1 models:
+
+- What is the state-space of the rbc model ?
+- What is the space of the rbc_mc model ?
+
+How to construct an element ?
+
+- randomly (`draw`)
+- from the calibrated values
+    - `calibrated(model, :states)`or `calibrated(QP, model, :states)`
+- by hand `QP(space, loc)
+
+## Decision Rule
+
+A decision rule in dolo associates:
+
+- a qualified point from state-space
+- to a locator from control-space
+
+Examples:
+
+- `initial_guess(model::YModel, s::QP)`
+    - from the model file
+- `f(s::QP) = SVector( )`
+- `Policy(model.states, model.controls, u->u.val[1]*0.5)`
+
+## Transitions
+
+Transitions are represented by function `τ(model::YModel, s::QP, x::SVector)`
+
+- it takes random values
+
+For `YModel` the precise definition of `τ` depends on the kind of exogenous shock:
+
+- IID (ex: `MvNormal`)
+- Continuous-Space Markov Process (ex: `VAR1`)
+- Discrete-Space Markov Process (ex: `MarkovChain`)
+
+## Transitions with IID shocks
+
+IID shock $\epsilon_t$ is defined as exogenous `MvNormal(μ, Σ)`
+
+- it is *not* included in the state space
+
+The law of motion for the states is:
+$$s_t = g(s_{t-1}, x_{t-1}, \epsilon_t)$$
+
+
+Function $g$ corresponds to the `transition` block / function
+
+Example: `consumption_savings_iid`
+$$w_t = (w_{t-1} - c_{t-1}) \overline{r} e^{\epsilon^r_t} + e^{\epsilon^y_t}$$
+
+## Transitions with VAR shocks
+
+VAR shock $m_t$ is defined as exogenous `VAR1(ρ, Σ)`
+
+$$s^x_t = \rho s^x_{t-1} + \epsilon_t$$
+$$s^e_t = g(s^x_t, s^e_{t-1}, x_{t-1}, s^x_t)$$
+
+where $s_t=(s^x_t, s^e_t)$ is the vector of states.
+
+Function $g$ corresponds to the `transition` block / function
+
+$$\tau( () ) == $$
+
+Example: `consumption_savings_ar1`, `rbc_ar1`:
+
+## Transitions with MarkovChain
+
+The exogenous process follows a Markov Chain which takes values ($(m_i)_{i\in[1,N]}$) with transition probabilities $(P_{ij})$.
+
+The law of motion for continous states depend on the *values* taken by exogenous shocks so that with probability $P_{ij}$:
+
+$$s^e_t = g(m_{i}, s^e_{t-1}, x_{t-1}, m_j)$$
+
+A locator for the state-space is then $(i, s^e_t)$ and the corresponding values are $(s^x_t, s^e_t)$
+
+Example: `consumption_savings_mc`, `rbc_mc`
+
+## Exercise: learning an optimal solution
+
+Consider the iid version for the consumption-savings model.
+
+- Import the model.
+- Choose an initial point s0.
+- Construct the decision rule $min(w, \theta_0 + \theta_1 (w-\theta_0))$
+- Compute the (discounted) lifetime reward over one simulation
+- Use ForwardDiff to differentiate the result w.r.t. $\theta_0, \theta_1$
+- Perform stochastic gradient descent to optimize for $\theta_0, \theta_1$.
+- Plot resulting decision rule.
+
+
+## Grids
+
+For nonlinear models decision rules are typically approximated from their values on a grid.
+
+The following grids are available:
+
+- Cartesian grids (`CartesianGrid` or `CGrid`)
+- Scattered grids (`SGrid`)
+- Product grids (`PGrid`, `×`)
+
+Grids also feature:
+
+- locator (the index)
+- values (for the different variables)
+
+## Discretization
+
+Grids are obtained in several ways:
+
+- by discretizing a space
+- by discretizing a process
+    - an AR1 defined on $]-\infty, +\infty[$...
+    - ...becomes a Markov chain defined on an SGrid
+
+. . .
+
+What about the discretization of an IID process?
+
+## Discretizing the model
+
+Ultimately, the discretization of *the model*
+results in:
+
+- a discrete grid $\mathcal{G}$ for the state-space
+- discrete transition probabilities $\tau$ so that for $s\in\mathcal{G}$
+    $\tau(s,x)  ≈ (w_k, s_k)_{k=1:K}$
+
+The resulting information is stored in a *discretized model* of type `DYModel`. It is the result of function `discretize`.
+
+::: aside
+Note that in general $s_k ∉ \mathcal{G}$
+:::
+
+## Vector of states / vector of controls
+
+
+For a grid $\mathbb{s} = (s_i)_{i=1:N}$
+
+We associate a vector of controls $\mathbb{x}=({x_i})_{i=1:N}$.
+
+- each $x_i$ can correspond to several controls and is represented as an SVector. Same for $s_i$.
+
+The corresponding object inherits the geometry of the grid and accepts the same indices. It is a `GVector`.
+
+## Decision Rule and Interpolation
+
+To represent a decision rule on the whole state-space we need:
+
+- a grid
+- values on the grid
+- a procedure to interpolate values on the domain
+
+This is done by object `DFun`. For now, it accepts linear or cubic interpolation (with linear extrapolation).
+
+## Exercise
+
+- Define an 2d state-space `x1,x2` with 10 points in each dimension.
+- Discretize the state-space
+- Compute the vector of values for the sinc function
+- Plot the interpolated values
+
+
+# Solution Algorithms
+
+## Optimality criteria
+
+So far, we have not specified any optimality criterium.
+
+We consider two kinds of criteria which require different information to allow for different solution methods
+
+- maximize $\mathbb{E}_0 \beta_t r(s,x)$
+    - info `reward` and `time_discount(model)`
+    - methods: VFI variants
+
+- optimality conditions linking decision rules today and tomorrow:
+    - TI (and variants)
+
+
+## Preliminary remarks
+
+Most algorithms are implemented as a recursive sequence for the vector of controls (or values):
+$\mathbb{x}_n = f(\mathbb{x}_{n-1})$
+and/or try to solve a system $F(\mathbb{x}_n)=0$
+
+We use the standard notations:
+
+- solution criterion: $\epsilon_n = |F(\mathbb{x}_n)|$
+- successive approximation errors $\eta_n = |\mathbb{x}_n - \mathbb{x}_{n-1}|$
+- ratio of successive approximation errors $\lambda_n = \frac{\eta_n}{\eta_{n-1}}$
+
+
+## Value Function Iteration
+
+For a given value vector $\mathbb{v}_n$
+
+- Define the value function $\mathcal{V}_n(s)=\mathcal{I}(s; \mathbb{s}, \mathbb{v}_n)$ which interpolate  $\mathbb{v}_n$ on the whole state-space $\mathbb{s}$
+- For any grid point $s_i$, solve
+$$v_i = \max_{x_i} U(s_i, x_i) + \beta \mathbb{E}_{s^{\prime} \in \tau(s_i, x_i)} \mathcal{V}_n(s^{\prime})$$
+- Set $\mathbb{v}_{n+1}=(v_i)_{i=1:N}$ and compute $\eta_{n+1} = |\mathbb{v}_{n+1} - \mathbb{v}_{n+1}|$
+    
+    - Stop if $|\eta_{n+1}<{\tau}_{\eta}|$
+
+The Bellman operator $\mathbb{v}_{n+1} = \mathfrak{B}(\mathbb{v}_n)$ converges geometrically.
+
+## Howard Improvements
+
+Take the vector of values $\mathbb{v_n}$ as well as the vector of controls $\mathbb{x_n}$ resulting from the Bellman operator.
+
+Consider the evaluation operator (in vectorized form):
+$$\tilde{\mathbb{v}}_{k+1} =  U(\mathbb{s}, \mathbb{x_n}) + \beta \mathbb{E}_{\mathbb{s}^{\prime} \in \tau(\mathbb{s}, \mathbb{x}_n)} \mathcal{I}(\mathbb{s}^{\prime}; \mathbb{s}, \mathbb{\tilde{v}}_k)$$
+
+The evaluation operator $\tilde{\mathbb{v}}_{k+1}=\mathfrak{E}(\mathbb{\tilde{v}}_k)$ converges towards the value of following policy $\mathbb{x}_n$ forever.
+  
+::: callout-note
+
+### (Optimistic) Improved Value Function Algorithm
+
+- Start with $\mathbb{x_n}$ and $\mathbb{v_n}$
+- Compute a Bellman step: $\mathbb{x}_{n+1}, \tilde{\mathbb{v}}_{n+1}=\mathfrak{B}(\mathbb{v}_n)$
+- Compute $K$ evaluation steps $\mathbb{v}_{n+1} = \mathfrak{E}^K(\tilde{\mathbb{v}}_{n})$
+
+:::
+
+## Exercise
+
+Use the `value_iteration()` function to solve
+
+- Import Consumption Savings model
+- Solve with Value Function iteration
+- Plot the resulting decision rule
+- Change the discount factor and compare
+- Use the `trace` option to show the convergence of value and policy towards the solution.
+- Try the `improve=true` option and compare the convergence.
+
+## First Order Conditions
+
+Many economic problems are represented by first order conditions:
+
+- they can result from an optimization problem
+- or represent constraints of the model
+
+In Dolo, they are called `arbitrage` conditions and pin down all the controls.
+
+Arbitrage equations can be associated with *complementarity* conditions to deal with occasionnally binding conditions.
+
+## Arbitrage Equations Specification
+
+Arbitrage equations link choices today and and tomorrow. They can depend on any variable on both dates.
+
+We use the following general specification:
+
+$$E_t f(s_t, x_t, s_{t+1}, x_{t+1}) = 0$$
+
+. . .
+
+Denoting by $\varphi$ and $\tilde{\varphi}$ the decision rule today and tomorrow we can rewrite optimality conditions as a functional equation
+
+$$F(\varphi, \tilde{\varphi})(s) = E_{s^{\prime}\in\tau(s,\varphi(s))} f(s, \varphi(s), s^{\prime}, \tilde{\varphi}(s^{\prime})) = 0$$
+
+## Collocation
+
+Discretizing the model yields a grid $(s_i)_{i \in 1:N}$ as well as discrete transitions. The corresponding vector of controls $\mathbb{x}$ today must satisfy:
+
+$$F(\varphi)(s_i) = \sum_{(w,s^{\prime})\in\tau(s_i,x_i)} w f(s, x_i, s^{\prime}, \varphi(s^{\prime})) = 0$$
+
+We can also use an interpolation method to approximate the decision rule tomorrow $\varphi(s^{\prime}) \approx \mathcal{I}(s^{\prime}; \mathbb{s}, \mathbb{x})$ to get:
+
+$$F(s_i, x_i, \mathbb{x}) = \sum_{(w,s^{\prime})\in\tau(s_i,x_i)} w f(s_i, x_i, s^{\prime},\mathcal{I}(s^{\prime}(s_i; \mathbb{s}, \tilde{\mathbb{x}}) )) = 0$$
+
+## Euler Problems
+
+If we remove the dependence on $\mathbb{s}$ and vectorize w.r.t. $i$ we obtain a computable condition 
+
+$$\boxed{F(\mathbb{x},\tilde{\mathbb{x}}) = 0}$$
+
+Exercise:
+
+- discretize a model
+- compute $F$ for a given initial guess
+
+## Time Iteration Algorithm
+
+The time iteration algorithm consists in computing $\mathbb{x}_{n+1}$ such that $$F(\mathbb{x}_{n+1},{\mathbb{x}}_n) = 0$$
+
+This is typically done with a nonlinear solver applied to $$u  \rightarrow F(u,{\mathbb{x}}_n)$$
+
+Because each grid point are solved separately, the jacobian $F^{\prime}_1$ is block diagonal and easy to compute.
+
+::: aside
+
+The solver currently used in dolo is a simple newton algorithm with bacskstepping.
+
+:::
+
+
+## Complementarity Conditions
+
+Example:
+$$\beta E_t \left[ c_{t+1}^{-\gamma} (1+r) \right] + \eta_t = c_t^{-\gamma}$$
+
+$$\eta_t \geq 0, w_t \geq c_t, (w_t-c_t)\eta_t = 0$$
+
+The second line corresponds to *complementarity conditions*.
+It is more concisely denoted by $$\eta_t \geq 0 \perp (w_t - c_t)$$
+
+It is also equivalent to $min(\eta_t, w_t - c_t) = 0$.
+
+## Complementarity Conditions (2)
+
+To formulate occasionally binding constraints more conveniently, Dolo handles the following specification:
+
+$$0 \leq E_t f(s_t, x_t, s_{t+1}, x_{t+1}) \leq 0 \perp lb(s_t) \leq x_t \leq ub(s_t)$$
+
+In this formulation, each control is associated to bounds and the corresponding optimality condition can be violated when it is equal to a bound.
+
+Bilateral complementarity condition $0\leq f(x) \leq 0 \perp a\leq x \leq b$ is interpreted as $0\leq f(x) \perp a \leq x$ and $f(x)\leq 0 \perp x \leq b$.
+
+## Complementarity Conditions (3)
+
+In the consumption-savings choice (or in a sudden-stop model), we can write the consumption optimality condition as :
+$$\beta E_t \left[ c_{t+1}^{-\gamma} (1+r) \right] = c_t^{-\gamma} \perp c_t \leq w_t$$
+
+Note that complementarity conditions are naturally associated to kuhn-tucker condition but can also be used to represent min/max operations.
+
+## Exercise
+
+Compare `consumption_savings_⊥.jl` and `consumption_savings.yaml`.
+
+For numerical algorithms it is useful to use the Fisher-Burmeister function defined as:
+
+$$FB(a,b) = \frac{a+b-\sqrt{a^2+b^2}}{2}$$
+
+Plot in 2d the functions ⊥ and ⊥⊥ from NoLib. Observe that they have the same zeros.
+
+
+## Improved Time Iteration
+
+Now suppose we have just computed one iteration
+$$x_{n+1}= T(x_n)$$
+
+The solution satisfies 
+$$x = T(x)$$
+
+At first order 
+
+$$x_{n+1} - x = T^{\prime}(x_n) (x_n-x)$$
+
+## Improved Time Iterations (2)
+
+We can use this relation to make a guess for the fixed point:$$x = (I-\underbrace{T^{\prime}(x_n)}_{M})^{-1} (\underbrace{x_{n+1}-T^{\prime}(x_n) x_n}_{h_n} )  $$
+
+When time-iterations are convergent $\rho(T^{\prime}(x_n))<1$ and we can write:$$x = \sum_k M^k h_n$$
+
+This step can be interpreted as continuing to iterate on the Euler equation, as if the model was locally linear. It relates to the evaluation step in VFI.
+
+## How do we compute $T^{\prime}$ ?
+
+The time-iteration operator is implicitly defined by:
+$$F(\mathcal{T}(\mathbb{x}), \mathbb{x})=0$$
+
+We can differentiate this expression in $x$ to get:
+
+$$F^{\prime}_1(\mathcal{T}(\mathbb{x}), \mathbb{x})T^{\prime}. dx + F^{\prime}_2 (\mathbb{x}), \mathbb{x}). dx=0$$
+
+Which yields the formula for the differential operator 
+
+$$T^{\prime}.dx = -(F^{\prime}_1)^{-1} F^{\prime}_2.dx=0$$
+
+We have seen that $(F^{\prime}_1)$ is easy to compute and $F^{\prime}_2.dx$ can be computed efficiently which is enough (cf WP).
+
+## Exercise
+
+Use the `time_iteration` method to solve the various models.
+
+Check  option `improve=true` on the timings and see the effect of changing the initial decision rule.
+
+# Conclusion
+
+As you have probably seen, the library under heavy development.
+
+What to expect in the near future?
+
+- more performance and GPU support
+- extension to compute heterogenous agents equilibria (essentially a rewrite of DolARK)
+- tools for fully/partially discrete models
+
+In the planning phase: updates to the language to match new featues.
+
