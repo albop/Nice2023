@@ -1,0 +1,6 @@
+{
+	"name": "Julia (Community)",
+	"build": { "dockerfile": "Dockerfile" },
+	"extensions": ["julialang.language-julia", "albop.dolo-language"],
+	"remoteUser": "vscode"
+}
